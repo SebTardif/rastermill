@@ -536,9 +536,16 @@ function grayscaleAlphaPng(width: number, height: number, alpha = 128): Buffer {
 
 function tiffImageFileDirectories(
   pages: readonly { width: number; height: number }[],
-  options?: { subIfd?: boolean; byteOrder?: "II" | "MM"; dimensionType?: 3 | 4 },
+  options?: {
+    subIfd?: boolean;
+    byteOrder?: "II" | "MM";
+    dimensionType?: 3 | 4;
+    orientation?: number;
+  },
 ): Buffer {
-  const entryCount = options?.subIfd ? 3 : 2;
+  const orientation = options?.orientation;
+  const hasOrientation = orientation !== undefined;
+  const entryCount = (options?.subIfd ? 3 : 2) + (hasOrientation ? 1 : 0);
   const ifdSize = 2 + entryCount * 12 + 4;
   const buffer = Buffer.alloc(8 + ifdSize * pages.length);
   const byteOrder = options?.byteOrder ?? "II";
@@ -567,8 +574,17 @@ function tiffImageFileDirectories(
     };
     writeEntry(0, 256, page.width);
     writeEntry(1, 257, page.height);
+    let nextEntry = 2;
+    if (hasOrientation) {
+      const offset = ifdOffset + 2 + nextEntry * 12;
+      writeU16(0x0112, offset);
+      writeU16(3, offset + 2);
+      writeU32(1, offset + 4);
+      writeU16(orientation, offset + 8);
+      nextEntry += 1;
+    }
     if (options?.subIfd) {
-      writeEntry(2, 330, 8);
+      writeEntry(nextEntry, 330, 8);
     }
     const nextOffset = pageIndex + 1 < pages.length ? 8 + (pageIndex + 1) * ifdSize : 0;
     writeU32(nextOffset, ifdOffset + 2 + entryCount * 12);
@@ -2702,6 +2718,47 @@ describe("Rastermill", () => {
       expect(jpeg).toMatchObject({ format: "jpeg", width: 4, height: 2 });
     },
   );
+
+  it("reads TIFF orientation from the first IFD", () => {
+    expect(
+      readImageProbeFromHeader(
+        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 6 }),
+      ),
+    ).toMatchObject({
+      format: "tiff",
+      width: 40,
+      height: 20,
+      orientation: 6,
+    });
+    expect(
+      readImageProbeFromHeader(
+        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 8 }),
+      ),
+    ).toMatchObject({
+      format: "tiff",
+      width: 40,
+      height: 20,
+      orientation: 8,
+    });
+    expect(
+      readImageProbeFromHeader(
+        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 9 }),
+      ),
+    ).toMatchObject({
+      format: "tiff",
+      width: 40,
+      height: 20,
+      orientation: null,
+    });
+    expect(
+      readImageProbeFromHeader(tiffImageFileDirectories([{ width: 40, height: 20 }])),
+    ).toMatchObject({
+      format: "tiff",
+      width: 40,
+      height: 20,
+      orientation: null,
+    });
+  });
 
   it("uses the largest linked TIFF page for metadata and pixel limits", async () => {
     const rastermill = createRastermill({ limits: { inputPixels: 25_000_000 } });

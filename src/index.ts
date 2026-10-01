@@ -992,8 +992,17 @@ function readIsoBmffOrientation(buffer: Buffer): number | null {
   return readIsoBmffPrimaryItemMetadata(buffer)?.orientation ?? null;
 }
 
+function readTiffOrientation(buffer: Buffer): number | null {
+  if (!readTiffMetadata(buffer)) {
+    return null;
+  }
+  return readExifOrientationFromTiff(buffer, 0, buffer.length);
+}
+
 function readImageOrientation(buffer: Buffer): number | null {
-  return readJpegExifOrientation(buffer) ?? readIsoBmffOrientation(buffer);
+  return (
+    readJpegExifOrientation(buffer) ?? readIsoBmffOrientation(buffer) ?? readTiffOrientation(buffer)
+  );
 }
 
 function readJpegMetadata(buffer: Buffer): ImageMetadata | null {
@@ -1076,7 +1085,13 @@ export function readImageProbeFromHeader(input: ImageInput): ImageProbe | null {
   }
   const tiff = readTiffMetadata(buffer);
   if (tiff) {
-    return { ...tiff, format: "tiff", hasAlpha: null, orientation: null, bytes: buffer.length };
+    return {
+      ...tiff,
+      format: "tiff",
+      hasAlpha: null,
+      orientation: readTiffOrientation(buffer),
+      bytes: buffer.length,
+    };
   }
   const primaryHeif = readIsoBmffPrimaryItemMetadata(buffer);
   const heif = primaryHeif?.metadata ?? readLargestIsoBmffImageMetadata(buffer);

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read TIFF Orientation when sizing an encode, so a rotated image keeps its proportions.
+
 ## 0.4.0 - 2026-09-24
 
 **Highlights:** BMP inputs are now supported, Windows-native JPEG conversion works without resizing, and failed Photon transforms release their image memory.
