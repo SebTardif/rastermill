@@ -616,7 +616,9 @@ function readTiffUnsignedLong(buffer: Buffer, offset: number, littleEndian: bool
   return littleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
 }
 
-function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
+type TiffPage = ImageMetadata & { orientation: number | null };
+
+function readTiffPages(buffer: Buffer): TiffPage[] | null {
   if (buffer.length < 8) {
     return null;
   }
@@ -629,7 +631,7 @@ function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
     return null;
   }
   let ifdOffset = readTiffUnsignedLong(buffer, 4, littleEndian);
-  let largest: ImageMetadata | null = null;
+  const pages: TiffPage[] = [];
   const seen = new Set<number>();
 
   while (ifdOffset !== 0) {
@@ -647,14 +649,12 @@ function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
 
     let width: number | null = null;
     let height: number | null = null;
+    let orientation: number | null = null;
     for (let index = 0; index < entryCount; index += 1) {
       const entryOffset = entriesStart + index * 12;
       const tag = readTiffUnsignedInteger(buffer, entryOffset, littleEndian);
       if (tag === 330) {
         return null;
-      }
-      if (tag !== 256 && tag !== 257) {
-        continue;
       }
       const type = readTiffUnsignedInteger(buffer, entryOffset + 2, littleEndian);
       const count = readTiffUnsignedLong(buffer, entryOffset + 4, littleEndian);
@@ -667,8 +667,10 @@ function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
           : readTiffUnsignedLong(buffer, entryOffset + 8, littleEndian);
       if (tag === 256) {
         width = value;
-      } else {
+      } else if (tag === 257) {
         height = value;
+      } else if (tag === 0x0112 && type === 3 && value >= 1 && value <= 8) {
+        orientation = value;
       }
     }
 
@@ -676,11 +678,30 @@ function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
     if (!metadata) {
       return null;
     }
-    largest = pickLargerImageMetadata(largest, metadata);
+    pages.push({ ...metadata, orientation });
     ifdOffset = readTiffUnsignedLong(buffer, entriesEnd, littleEndian);
   }
 
-  return largest;
+  return pages.length > 0 ? pages : null;
+}
+
+function largestTiffPage(pages: readonly TiffPage[]): TiffPage | null {
+  let chosen: TiffPage | null = null;
+  for (const page of pages) {
+    if (pickLargerImageMetadata(chosen, page) !== chosen) {
+      chosen = page;
+    }
+  }
+  return chosen;
+}
+
+function readTiffMetadata(buffer: Buffer): ImageMetadata | null {
+  const pages = readTiffPages(buffer);
+  return pages ? largestTiffPage(pages) : null;
+}
+
+function readTiffEncodedPage(buffer: Buffer): TiffPage | null {
+  return readTiffPages(buffer)?.[0] ?? null;
 }
 
 function readIsoBmffBoxSize(buffer: Buffer, offset: number, end: number): number | null {
@@ -993,15 +1014,16 @@ function readIsoBmffOrientation(buffer: Buffer): number | null {
 }
 
 function readTiffOrientation(buffer: Buffer): number | null {
-  if (!readTiffMetadata(buffer)) {
-    return null;
-  }
-  return readExifOrientationFromTiff(buffer, 0, buffer.length);
+  const pages = readTiffPages(buffer);
+  return pages ? (largestTiffPage(pages)?.orientation ?? null) : null;
 }
 
 function readImageOrientation(buffer: Buffer): number | null {
   return (
-    readJpegExifOrientation(buffer) ?? readIsoBmffOrientation(buffer) ?? readTiffOrientation(buffer)
+    readJpegExifOrientation(buffer) ??
+    readIsoBmffOrientation(buffer) ??
+    readTiffEncodedPage(buffer)?.orientation ??
+    null
   );
 }
 
@@ -1698,13 +1720,15 @@ function autoOrientedMetadata(
   metadata: ImageMetadata,
   autoOrient: boolean,
 ): ImageMetadata {
+  const encodedPage = readTiffEncodedPage(buffer);
+  const base = encodedPage ?? metadata;
   if (!autoOrient) {
-    return metadata;
+    return { width: base.width, height: base.height };
   }
-  const orientation = readImageOrientation(buffer);
+  const orientation = encodedPage ? encodedPage.orientation : readImageOrientation(buffer);
   return orientation === 5 || orientation === 6 || orientation === 7 || orientation === 8
-    ? { width: metadata.height, height: metadata.width }
-    : metadata;
+    ? { width: base.height, height: base.width }
+    : { width: base.width, height: base.height };
 }
 
 function assertOutputPixelBudget(

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Read TIFF Orientation when sizing an encode, so a rotated image keeps its proportions.
+- Read TIFF Orientation from the same page that supplies the encode size. Pixel limits still use the largest linked page, and a rotated first page is not resized with another page's dimensions.
 
 ## 0.4.0 - 2026-09-24
 

@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -25,6 +27,8 @@ function findExecutable(command: string): string | null {
   }
   return null;
 }
+
+const execFileAsync = promisify(execFile);
 
 const imageMagick =
   process.platform === "win32"
@@ -541,10 +545,11 @@ function tiffImageFileDirectories(
     byteOrder?: "II" | "MM";
     dimensionType?: 3 | 4;
     orientation?: number;
+    pageOrientations?: readonly number[];
   },
 ): Buffer {
-  const orientation = options?.orientation;
-  const hasOrientation = orientation !== undefined;
+  const pageOrientations = options?.pageOrientations;
+  const hasOrientation = options?.orientation !== undefined || pageOrientations !== undefined;
   const entryCount = (options?.subIfd ? 3 : 2) + (hasOrientation ? 1 : 0);
   const ifdSize = 2 + entryCount * 12 + 4;
   const buffer = Buffer.alloc(8 + ifdSize * pages.length);
@@ -575,7 +580,8 @@ function tiffImageFileDirectories(
     writeEntry(0, 256, page.width);
     writeEntry(1, 257, page.height);
     let nextEntry = 2;
-    if (hasOrientation) {
+    const orientation = pageOrientations?.[pageIndex] ?? options?.orientation;
+    if (hasOrientation && orientation !== undefined) {
       const offset = ifdOffset + 2 + nextEntry * 12;
       writeU16(0x0112, offset);
       writeU16(3, offset + 2);
@@ -2759,6 +2765,61 @@ describe("Rastermill", () => {
       orientation: null,
     });
   });
+
+  it("pairs TIFF orientation with the page that supplies the dimensions", () => {
+    const source = tiffImageFileDirectories(
+      [
+        { width: 40, height: 20 },
+        { width: 400, height: 100 },
+      ],
+      { pageOrientations: [6, 1] },
+    );
+
+    expect(readImageMetadataFromHeader(source)).toEqual({ width: 400, height: 100 });
+    expect(readImageProbeFromHeader(source)).toMatchObject({
+      format: "tiff",
+      width: 400,
+      height: 100,
+      orientation: 1,
+    });
+  });
+
+  it.runIf(imageMagick !== null)(
+    "encodes a linked TIFF from the first page instead of the largest page",
+    async () => {
+      const command = imageMagick?.path;
+      if (!command) {
+        return;
+      }
+      const directory = await mkdtemp(path.join(os.tmpdir(), "rastermill-tiff-pages-"));
+      try {
+        const first = path.join(directory, "first.tif");
+        const second = path.join(directory, "second.tif");
+        const sourcePath = path.join(directory, "linked.tif");
+        await execFileAsync(command, ["-size", "40x20", "xc:red", "-orient", "right-top", first]);
+        await execFileAsync(command, [
+          "-size",
+          "400x100",
+          "xc:blue",
+          "-orient",
+          "top-left",
+          second,
+        ]);
+        await execFileAsync(command, [first, second, sourcePath]);
+        const source = await readFile(sourcePath);
+        expect(readImageProbeFromHeader(source)).toMatchObject({
+          width: 400,
+          height: 100,
+          orientation: 1,
+        });
+        const rastermill = createRastermill({ execution: "external" });
+        const encoded = await rastermill.encode(source, { format: "png" });
+        expect(encoded).toMatchObject({ format: "png", width: 20, height: 40 });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("uses the largest linked TIFF page for metadata and pixel limits", async () => {
     const rastermill = createRastermill({ limits: { inputPixels: 25_000_000 } });
