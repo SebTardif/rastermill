@@ -2148,6 +2148,43 @@ function ffmpegStripArgs(): string[] {
   return ["-map_metadata", "-1"];
 }
 
+function ffmpegTransformArgs(buffer: Buffer, native: NativeEncodeOptions, resize: boolean) {
+  const tiff = readTiffEncodedPage(buffer);
+  const orientation = native.autoOrient === false ? null : tiff?.orientation;
+  const filters: string[] = [];
+  switch (orientation) {
+    case 2:
+      filters.push("hflip");
+      break;
+    case 3:
+      filters.push("hflip", "vflip");
+      break;
+    case 4:
+      filters.push("vflip");
+      break;
+    case 5:
+      filters.push("transpose=clock", "hflip");
+      break;
+    case 6:
+      filters.push("transpose=clock");
+      break;
+    case 7:
+      filters.push("transpose=clock", "vflip");
+      break;
+    case 8:
+      filters.push("transpose=cclock");
+      break;
+  }
+  if (resize) {
+    filters.push(buildFfmpegResizeFilter(native.target, native.fit));
+  }
+  return {
+    // FFmpeg does not consistently apply TIFF orientation; own it before scaling.
+    inputArgs: tiff ? ["-noautorotate"] : [],
+    outputArgs: filters.length > 0 ? ["-vf", filters.join(",")] : [],
+  };
+}
+
 function sipsOrientationArgs(orientation: number): string[] {
   switch (orientation) {
     case 2:
@@ -2385,14 +2422,16 @@ async function externalToJpeg(
     const output = workspace.path("out.jpg");
     if (tool.flavor === "ffmpeg") {
       const qv = clampInteger(31 - quality * 0.29, 2, 31);
+      const transform = ffmpegTransformArgs(buffer, native, resize);
       await runTool(
         tool.command,
         [
           ...ffmpegCommonArgs(),
+          ...transform.inputArgs,
           "-i",
           input,
           ...ffmpegStripArgs(),
-          ...(resize ? ["-vf", buildFfmpegResizeFilter(native.target, native.fit)] : []),
+          ...transform.outputArgs,
           "-frames:v",
           "1",
           "-q:v",
@@ -2465,15 +2504,16 @@ async function externalToWebp(
     const input = await workspace.write("in.img", buffer);
     const output = workspace.path("out.webp");
     if (tool.flavor === "ffmpeg") {
+      const transform = ffmpegTransformArgs(buffer, native, true);
       await runTool(
         tool.command,
         [
           ...ffmpegCommonArgs(),
+          ...transform.inputArgs,
           "-i",
           input,
           ...ffmpegStripArgs(),
-          "-vf",
-          buildFfmpegResizeFilter(native.target, native.fit),
+          ...transform.outputArgs,
           "-frames:v",
           "1",
           "-quality",

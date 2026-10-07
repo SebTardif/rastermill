@@ -2725,45 +2725,22 @@ describe("Rastermill", () => {
     },
   );
 
-  it("reads TIFF orientation from the first IFD", () => {
-    expect(
-      readImageProbeFromHeader(
-        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 6 }),
-      ),
-    ).toMatchObject({
-      format: "tiff",
-      width: 40,
-      height: 20,
-      orientation: 6,
-    });
-    expect(
-      readImageProbeFromHeader(
-        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 8 }),
-      ),
-    ).toMatchObject({
-      format: "tiff",
-      width: 40,
-      height: 20,
-      orientation: 8,
-    });
-    expect(
-      readImageProbeFromHeader(
-        tiffImageFileDirectories([{ width: 40, height: 20 }], { orientation: 9 }),
-      ),
-    ).toMatchObject({
-      format: "tiff",
-      width: 40,
-      height: 20,
-      orientation: null,
-    });
-    expect(
-      readImageProbeFromHeader(tiffImageFileDirectories([{ width: 40, height: 20 }])),
-    ).toMatchObject({
-      format: "tiff",
-      width: 40,
-      height: 20,
-      orientation: null,
-    });
+  it.each(["II", "MM"] as const)("reads TIFF orientation with %s byte order", (byteOrder) => {
+    for (const orientation of [1, 2, 3, 4, 5, 6, 7, 8, 0, 9, undefined]) {
+      expect(
+        readImageProbeFromHeader(
+          tiffImageFileDirectories([{ width: 40, height: 20 }], {
+            byteOrder,
+            ...(orientation === undefined ? {} : { orientation }),
+          }),
+        ),
+      ).toMatchObject({
+        format: "tiff",
+        width: 40,
+        height: 20,
+        orientation: orientation && orientation <= 8 ? orientation : null,
+      });
+    }
   });
 
   it("pairs TIFF orientation with the page that supplies the dimensions", () => {
@@ -2812,14 +2789,102 @@ describe("Rastermill", () => {
           height: 100,
           orientation: 1,
         });
-        const rastermill = createRastermill({ execution: "external" });
+        const rastermill = createRastermill({
+          execution: "external",
+          commandResolver: (name) => (name === imageMagick?.command ? command : null),
+        });
         const encoded = await rastermill.encode(source, { format: "png" });
         expect(encoded).toMatchObject({ format: "png", width: 20, height: 40 });
+        expect(readImageMetadataFromHeader(encoded.data)).toEqual({ width: 20, height: 40 });
+        await expect(
+          rastermill.encode(source, { format: "png", autoOrient: false }),
+        ).resolves.toMatchObject({ width: 40, height: 20 });
+        await expect(
+          rastermill.encode(source, { format: "png", limits: { maxHeight: 20 } }),
+        ).resolves.toMatchObject({ width: 10, height: 20 });
+        await expect(
+          createRastermill({
+            execution: "external",
+            limits: { inputPixels: 1000 },
+            commandResolver: () => {
+              throw new Error("Decoder must not run before the pixel-budget check");
+            },
+          }).encode(source, { format: "png" }),
+        ).rejects.toMatchObject({ code: "RASTERMILL_INPUT_TOO_LARGE" });
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
     },
   );
+
+  it.runIf(imageMagick !== null && findExecutable("ffmpeg") !== null).each([
+    { orientation: "top-left", width: 80, height: 40, topLeft: [255, 0, 0] },
+    { orientation: "top-right", width: 80, height: 40, topLeft: [0, 255, 0] },
+    { orientation: "bottom-right", width: 80, height: 40, topLeft: [255, 255, 255] },
+    { orientation: "bottom-left", width: 80, height: 40, topLeft: [0, 0, 255] },
+    { orientation: "left-top", width: 40, height: 80, topLeft: [255, 0, 0] },
+    { orientation: "right-top", width: 40, height: 80, topLeft: [0, 0, 255] },
+    { orientation: "right-bottom", width: 40, height: 80, topLeft: [255, 255, 255] },
+    { orientation: "left-bottom", width: 40, height: 80, topLeft: [0, 255, 0] },
+  ])("orients TIFF pixels through FFmpeg for $orientation", async (expected) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "rastermill-tiff-ffmpeg-"));
+    try {
+      const sourcePath = path.join(directory, "source.tif");
+      await execFileAsync(imageMagick!.path!, [
+        "-size",
+        "80x40",
+        "xc:red",
+        "-fill",
+        "lime",
+        "-draw",
+        "rectangle 40,0 79,19",
+        "-fill",
+        "blue",
+        "-draw",
+        "rectangle 0,20 39,39",
+        "-fill",
+        "white",
+        "-draw",
+        "rectangle 40,20 79,39",
+        "-orient",
+        expected.orientation,
+        sourcePath,
+      ]);
+      const source = await readFile(sourcePath);
+      const rastermill = createRastermill({
+        execution: "external",
+        commandResolver: (name) => (name === "ffmpeg" ? findExecutable(name) : null),
+      });
+      const { PhotonImage } = await import("@silvia-odwyer/photon-node");
+      for (const format of ["jpeg", "webp"] as const) {
+        const output = await rastermill.encode(source, { format, quality: 95 });
+        expect(output).toMatchObject({ width: expected.width, height: expected.height });
+        const decoded = PhotonImage.new_from_byteslice(output.data);
+        try {
+          const pixels = decoded.get_raw_pixels();
+          const offset = (5 * expected.width + 5) * 4;
+          for (let channel = 0; channel < 3; channel += 1) {
+            expect(Math.abs(pixels[offset + channel]! - expected.topLeft[channel]!)).toBeLessThan(
+              40,
+            );
+          }
+        } finally {
+          decoded.free();
+        }
+        await expect(
+          rastermill.encode(source, { format, autoOrient: false }),
+        ).resolves.toMatchObject({ width: 80, height: 40 });
+        await expect(
+          rastermill.encode(source, { format, limits: { maxWidth: 20 } }),
+        ).resolves.toMatchObject({
+          width: 20,
+          height: expected.width === 80 ? 10 : 40,
+        });
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it("uses the largest linked TIFF page for metadata and pixel limits", async () => {
     const rastermill = createRastermill({ limits: { inputPixels: 25_000_000 } });

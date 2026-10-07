@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Read TIFF Orientation from the same page that supplies the encode size. Pixel limits still use the largest linked page, and a rotated first page is not resized with another page's dimensions.
+- Keep TIFF orientation paired with each page's dimensions, size encodes from the first page while checking the largest page against input limits, and apply TIFF transforms explicitly with FFmpeg (thanks @SebTardif, #20).
 
 ## 0.4.0 - 2026-09-24
 
